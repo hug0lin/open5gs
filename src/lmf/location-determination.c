@@ -162,7 +162,6 @@ int lmf_location_determine_ecid(
     ogs_sbi_message_t message;
     ogs_sbi_response_t *response = NULL;
     lmf_cell_info_t *serving_cell_info = NULL;
-    ogs_nr_cgi_t serving_ncgi;
     double final_lat = 0.0, final_lon = 0.0, final_alt = 0.0;
     double total_weight = 0.0;
     double uncertainty_radius = 0.0;
@@ -180,23 +179,10 @@ int lmf_location_determine_ecid(
     ogs_info("[%s] ECID location determination from measurements",
             location_request->supi ? location_request->supi : "Unknown");
 
-    /* Build serving cell NCGI from ECID response */
-    memset(&serving_ncgi, 0, sizeof(serving_ncgi));
-    serving_ncgi.cell_id = ecid_response->serving_cell.ncgi;
-    /* Use default PLMN if not available - should be improved */
-    ogs_plmn_id_build(&serving_ncgi.plmn_id, 999, 70, 2);
-
-    /* Lookup serving cell in database */
-    serving_cell_info = lmf_cell_database_find_by_ncgi(&serving_ncgi);
-    if (!serving_cell_info) {
-        ogs_error("[%s] Serving cell NCGI=%llx not found in database",
-                location_request->supi,
-                (unsigned long long)ecid_response->serving_cell.ncgi);
-        
-        /* Try to find by cell_id only */
-        serving_cell_info = lmf_cell_database_find_by_cell_id(
-                ecid_response->serving_cell.ncgi);
-    }
+    /* The ECID response carries the NCI but no PLMN. Only use an unambiguous
+     * database match; never invent a PLMN for a full NCGI lookup. */
+    serving_cell_info = lmf_cell_database_find_by_cell_id(
+            ecid_response->serving_cell.ncgi);
 
     if (!serving_cell_info) {
         ogs_error("[%s] Cannot calculate location: serving cell not in database",
@@ -241,19 +227,12 @@ int lmf_location_determine_ecid(
 
     /* Add neighbor cells */
     for (i = 0; i < ecid_response->num_neighbor_cells; i++) {
-        ogs_nr_cgi_t neighbor_ncgi;
         lmf_cell_info_t *neighbor_cell_info = NULL;
         double neighbor_weight;
 
-        memset(&neighbor_ncgi, 0, sizeof(neighbor_ncgi));
-        neighbor_ncgi.cell_id = ecid_response->neighbor_cells[i].ncgi;
-        ogs_plmn_id_build(&neighbor_ncgi.plmn_id, 999, 70, 2);
-
-        neighbor_cell_info = lmf_cell_database_find_by_ncgi(&neighbor_ncgi);
-        if (!neighbor_cell_info) {
-            neighbor_cell_info = lmf_cell_database_find_by_cell_id(
-                    ecid_response->neighbor_cells[i].ncgi);
-        }
+        /* A neighbor NCI without PLMN must resolve uniquely in the database. */
+        neighbor_cell_info = lmf_cell_database_find_by_cell_id(
+                ecid_response->neighbor_cells[i].ncgi);
 
         if (neighbor_cell_info) {
             /* Weight by RSRP */
@@ -330,8 +309,8 @@ int lmf_location_determine_ecid(
     ogs_assert(plmn_id_openapi);
     
     /* Convert PLMN ID */
-    plmn_id_openapi->mcc = ogs_plmn_id_mcc_string(&serving_ncgi.plmn_id);
-    plmn_id_openapi->mnc = ogs_plmn_id_mnc_string(&serving_ncgi.plmn_id);
+    plmn_id_openapi->mcc = ogs_plmn_id_mcc_string(&serving_cell_info->ncgi.plmn_id);
+    plmn_id_openapi->mnc = ogs_plmn_id_mnc_string(&serving_cell_info->ncgi.plmn_id);
     
     ncgi_openapi->plmn_id = plmn_id_openapi;
     ncgi_openapi->nr_cell_id = ogs_msprintf("%llx",
@@ -717,23 +696,17 @@ int lmf_location_determine_cellid(lmf_location_request_t *location_request)
         }
     }
 
-    /* Build internal NCGI structure */
+    /* Resolve CELLID with the strongest available cell identity. */
+    memset(&ncgi, 0, sizeof(ncgi));
     ncgi.cell_id = cell_id;
-    if (mcc > 0 && mnc > 0) {
-        ogs_plmn_id_build(&ncgi.plmn_id, mcc, mnc, mnc_len);
-    } else {
-        /* Use default PLMN if not specified */
-        ogs_warn("[%s] PLMN not specified, using default 999/70",
-                location_request->supi);
-        ogs_plmn_id_build(&ncgi.plmn_id, 999, 70, 2);
-    }
 
-    /* Lookup cell in database */
-    cell_info = lmf_cell_database_find_by_ncgi(&ncgi);
-    if (!cell_info) {
-        /* Try fallback: lookup by cell_id only (if PLMN doesn't match) */
-        ogs_debug("[%s] Cell not found by NCGI, trying cell_id-only lookup",
-                location_request->supi);
+    if (mcc > 0 && mnc_len >= 2 && mnc_len <= 3) {
+        ogs_plmn_id_build(&ncgi.plmn_id, mcc, mnc, mnc_len);
+
+        /* An explicit PLMN must never be silently discarded. */
+        cell_info = lmf_cell_database_find_by_ncgi(&ncgi);
+    } else {
+        /* Without a PLMN, only an unambiguous NCI is acceptable. */
         cell_info = lmf_cell_database_find_by_cell_id(cell_id);
     }
 

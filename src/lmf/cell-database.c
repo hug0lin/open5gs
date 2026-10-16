@@ -274,13 +274,21 @@ lmf_cell_info_t *lmf_cell_database_find_by_cell_id(uint64_t cell_id)
 {
     lmf_cell_info_t *cell_info = NULL;
 
+    lmf_cell_info_t *match = NULL;
+
     ogs_list_for_each(&cell_database_list, cell_info) {
-        if (cell_info->ncgi.cell_id == cell_id) {
-            return cell_info;
+        if (cell_info->ncgi.cell_id != cell_id)
+            continue;
+
+        if (match) {
+            ogs_error("Ambiguous cell ID %llx: multiple PLMNs or cell entries match",
+                    (unsigned long long)cell_id);
+            return NULL;
         }
+        match = cell_info;
     }
 
-    return NULL;
+    return match;
 }
 
 int lmf_cell_get_position(ogs_nr_cgi_t *ncgi,
